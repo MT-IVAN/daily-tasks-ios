@@ -8,8 +8,6 @@ import {
   getCurrentMonthExpensesKey,
 } from '@/lib/redis'
 
-export const runtime = 'edge'
-
 function formatCOP(value: number): string {
   return `$${Math.round(value).toLocaleString('es-CO')}`
 }
