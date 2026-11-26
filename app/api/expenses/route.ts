@@ -59,6 +59,7 @@ async function classifyExpenseWithFallback(prompt: string) {
 }
 
 export async function GET() {
+  console.log('Some is requesting expenses... ')
   const monthStr = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Bogota',
     year: 'numeric',
@@ -71,7 +72,9 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const { merchant, amount, card } = await req.json()
+    const parsedBody = await req.json()
+    console.log('Some is creating expenses... ', parsedBody)
+    const { merchant, amount, card } = parsedBody
 
     if (!merchant || amount === undefined) {
       return NextResponse.json(
