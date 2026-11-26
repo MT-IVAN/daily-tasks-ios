@@ -1,8 +1,8 @@
 import { ImageResponse } from 'next/og'
-import { redis, Task, TASKS_KEY } from '@/lib/redis'
+import { redis, Task, getTodayTasksKey } from '@/lib/redis'
 
 export async function GET() {
-  const tasks = (await redis.get<Task[]>(TASKS_KEY)) || []
+  const tasks = (await redis.get<Task[]>(getTodayTasksKey())) || []
 
   const total = tasks.length
   const completed = tasks.filter((t) => t.done).length

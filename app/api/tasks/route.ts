@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { GoogleGenAI, Type } from '@google/genai'
-import { redis, Task, TASKS_KEY } from '@/lib/redis'
+import { redis, Task, getTodayTasksKey, TASKS_TTL_SECONDS } from '@/lib/redis'
 
 const ai = new GoogleGenAI()
 
@@ -54,7 +54,7 @@ async function generateTasksWithFallback(prompt: string) {
 }
 
 export async function GET() {
-  const tasks = (await redis.get<Task[]>(TASKS_KEY)) || []
+  const tasks = (await redis.get<Task[]>(getTodayTasksKey())) || []
   return NextResponse.json({ tasks })
 }
 
@@ -77,21 +77,23 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Falta el texto' }, { status: 400 })
     }
 
-    const currentTasks = (await redis.get<Task[]>(TASKS_KEY)) || []
+    const key = getTodayTasksKey()
+    const currentTasks = (await redis.get<Task[]>(key)) || []
 
     const instruction = `
-      Estado actual de tareas (JSON): ${JSON.stringify(currentTasks)}
+      Estado actual de tareas de hoy (JSON): ${JSON.stringify(currentTasks)}
       Instrucción del usuario: "${userPrompt}"
       
-      Actualiza la lista de tareas según la instrucción del usuario:
-      - Si pide agregar actividades, créalas con done: false y un id único corto.
-      - Si dice que ya hizo o completó algo, cambia done a true en la tarea correspondiente.
-      - Si pide limpiar, reiniciar el día o borrar todo, devuelve un array vacío o conserva solo las que pida.
+      Reglas estrictas para actualizar el JSON:
+      1. AGREGAR TAREAS: Si el usuario pide agregar una actividad (ej. "agrega ir al gym"), SIEMPRE crea un nuevo objeto con un id único nuevo y "done": false, INCLUSO SI ya existe otra tarea con el mismo nombre marcada como "done": true. Nunca omitas una tarea nueva solo porque ya se completó una igual antes.
+      2. COMPLETAR TAREAS: Si el usuario dice que ya hizo o completó algo, busca una tarea pendiente ("done": false) que coincida y cámbiala a "done": true. No modifiques tareas que ya estén en "done": true.
+      3. BORRAR / LIMPIAR: Si pide eliminar una tarea específica o limpiar todo el día, elimínala o devuelve [].
+      4. Conserva intactos los "id", "text" y "done" de las demás tareas existentes.
     `
 
     const response = await generateTasksWithFallback(instruction)
     const updatedTasks: Task[] = JSON.parse(response.text || '[]')
-    await redis.set(TASKS_KEY, updatedTasks)
+    await redis.set(getTodayTasksKey(), updatedTasks, { ex: TASKS_TTL_SECONDS })
 
     if (body.message?.chat?.id && process.env.TELEGRAM_BOT_TOKEN) {
       const summary = updatedTasks.length

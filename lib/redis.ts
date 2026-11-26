@@ -7,5 +7,17 @@ export interface Task {
   text: string
   done: boolean
 }
+const TIME_IN_HOURS = 30
+export const TASKS_TTL_SECONDS = 60 * 60 * TIME_IN_HOURS
 
-export const TASKS_KEY = 'daily_tasks'
+export function getTodayTasksKey(): string {
+  // Devuelve YYYY-MM-DD en zona horaria UTC-5 (America/Bogota)
+  const todayStr = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Bogota',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date())
+
+  return `daily_tasks:${todayStr}`
+}
