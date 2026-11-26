@@ -61,6 +61,10 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const body = await req.json()
+
+    if (body.update_id && !body.message?.text) {
+      return NextResponse.json({ ok: true })
+    }
     if (
       body.message &&
       String(body.message.chat.id) !== process.env.MY_CHAT_ID
