@@ -1,24 +1,47 @@
 import { NextResponse } from 'next/server'
-import { GoogleGenAI, Type } from '@google/genai'
+import { GoogleGenAI, Type, Part } from '@google/genai'
 import { redis, Task, getTodayTasksKey, TASKS_TTL_SECONDS } from '@/lib/redis'
 
 const ai = new GoogleGenAI()
 
-// Lista ordenada por prioridad: si el primero devuelve 503 o 429, pasa al siguiente
 const FALLBACK_MODELS = [
   'gemini-3.5-flash-lite',
   'gemini-3.1-flash-lite',
   'gemini-3.6-flash',
 ]
 
-async function generateTasksWithFallback(prompt: string) {
+async function downloadTelegramAudio(fileId: string): Promise<Part | null> {
+  const token = process.env.TELEGRAM_BOT_TOKEN
+  if (!token) return null
+
+  const fileInfoRes = await fetch(
+    `https://api.telegram.org/bot${token}/getFile?file_id=${fileId}`,
+  )
+  const fileInfo = await fileInfoRes.json()
+  const filePath = fileInfo?.result?.file_path
+  if (!filePath) return null
+
+  const audioRes = await fetch(
+    `https://api.telegram.org/file/bot${token}/${filePath}`,
+  )
+  const arrayBuffer = await audioRes.arrayBuffer()
+
+  return {
+    inlineData: {
+      data: Buffer.from(arrayBuffer).toString('base64'),
+      mimeType: 'audio/ogg',
+    },
+  }
+}
+
+async function generateTasksWithFallback(contents: string | Part[]) {
   let lastError: unknown
 
   for (const model of FALLBACK_MODELS) {
     try {
       return await ai.models.generateContent({
         model,
-        contents: prompt,
+        contents,
         config: {
           responseMimeType: 'application/json',
           responseSchema: {
@@ -39,11 +62,7 @@ async function generateTasksWithFallback(prompt: string) {
     } catch (error: any) {
       lastError = error
       const status = error?.status || error?.code
-      // Solo hacemos fallback si es sobrecarga (503) o rate limit (429)
       if (status === 503 || status === 429) {
-        console.warn(
-          `Modelo ${model} saturado (${status}), intentando fallback...`,
-        )
         continue
       }
       throw error
@@ -62,38 +81,59 @@ export async function POST(req: Request) {
   try {
     const body = await req.json()
 
-    if (body.update_id && !body.message?.text) {
+    const textInput: string | undefined = body.prompt || body.message?.text
+    const voiceFileId: string | undefined = body.message?.voice?.file_id
+
+    // Si es un evento de Telegram sin texto ni audio (ej. sticker, edición), responde 200
+    if (body.update_id && !textInput && !voiceFileId) {
       return NextResponse.json({ ok: true })
     }
-    if (
-      body.message &&
-      String(body.message.chat.id) !== process.env.MY_CHAT_ID
-    ) {
-      return NextResponse.json({ ok: true }) // Ignora mensajes de otros usuarios
-    }
-    const userPrompt: string | undefined = body.prompt || body.message?.text
 
-    if (!userPrompt) {
-      return NextResponse.json({ error: 'Falta el texto' }, { status: 400 })
+    if (!textInput && !voiceFileId) {
+      return NextResponse.json(
+        { error: 'Falta texto o audio' },
+        { status: 400 },
+      )
     }
 
     const key = getTodayTasksKey()
     const currentTasks = (await redis.get<Task[]>(key)) || []
 
-    const instruction = `
+    const rules = `
       Estado actual de tareas de hoy (JSON): ${JSON.stringify(currentTasks)}
-      Instrucción del usuario: "${userPrompt}"
       
       Reglas estrictas para actualizar el JSON:
-      1. AGREGAR TAREAS: Si el usuario pide agregar una actividad (ej. "agrega ir al gym"), SIEMPRE crea un nuevo objeto con un id único nuevo y "done": false, INCLUSO SI ya existe otra tarea con el mismo nombre marcada como "done": true. Nunca omitas una tarea nueva solo porque ya se completó una igual antes.
-      2. COMPLETAR TAREAS: Si el usuario dice que ya hizo o completó algo, busca una tarea pendiente ("done": false) que coincida y cámbiala a "done": true. No modifiques tareas que ya estén en "done": true.
-      3. BORRAR / LIMPIAR: Si pide eliminar una tarea específica o limpiar todo el día, elimínala o devuelve [].
+      1. AGREGAR TAREAS: Si pide agregar actividades, crea un objeto nuevo con un id único corto y "done": false, INCLUSO SI ya existe otra tarea igual en "done": true.
+      2. COMPLETAR TAREAS: Si dice que ya hizo o completó algo, cambia una tarea pendiente ("done": false) coincidente a "done": true. No modifiques tareas que ya estén en "done": true.
+      3. BORRAR / LIMPIAR: Si pide eliminar una tarea específica o limpiar todo, elimínala o devuelve [].
       4. Conserva intactos los "id", "text" y "done" de las demás tareas existentes.
     `
 
-    const response = await generateTasksWithFallback(instruction)
+    // Rama excluyente: o procesa audio, o procesa texto
+    let contents: string | Part[]
+
+    if (voiceFileId) {
+      const audioPart = await downloadTelegramAudio(voiceFileId)
+      if (!audioPart) {
+        return NextResponse.json(
+          { error: 'No se pudo descargar la nota de voz' },
+          { status: 500 },
+        )
+      }
+      contents = [
+        {
+          text: `${rules}\nEscucha la nota de voz adjunta con la instrucción del usuario.`,
+        },
+        audioPart,
+      ]
+    } else {
+      contents = `${rules}\nInstrucción del usuario: "${textInput}"`
+    }
+
+    const response = await generateTasksWithFallback(contents)
     const updatedTasks: Task[] = JSON.parse(response.text || '[]')
-    await redis.set(getTodayTasksKey(), updatedTasks, { ex: TASKS_TTL_SECONDS })
+
+    await redis.set(key, updatedTasks, { ex: TASKS_TTL_SECONDS })
 
     if (body.message?.chat?.id && process.env.TELEGRAM_BOT_TOKEN) {
       const summary = updatedTasks.length
@@ -117,7 +157,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ tasks: updatedTasks })
   } catch (error) {
-    console.error(error)
+    console.error('Error procesando tareas:', error)
     return NextResponse.json(
       { error: 'Error procesando tareas' },
       { status: 500 },
